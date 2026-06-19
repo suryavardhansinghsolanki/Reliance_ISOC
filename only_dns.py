@@ -129,11 +129,11 @@ with st.sidebar:
         st.rerun() 
 
 # ══════════════════════════════════════════════════════════════
-#  DNS CONFIG (MODIFIED: LTE Mobility updated)
+#  DNS CONFIG
 # ══════════════════════════════════════════════════════════════
 DNS_OPTIONS: Dict[str, list] = {
     "5G/Sub6":               ["2405:200:800::11"],
-    "LTE/Mobility":          ["49.45.0.1", "2405:200:800::1"], # Updated as requested
+    "LTE/Mobility":          ["49.45.0.1", "2405:200:800::1"], 
     "FTTX/UBR":              ["2405:200:800::3", "49.45.0.3"],
     "Enterprise":            ["2405:200:800::4", "49.45.0.4"],
     "Google DNS (IPv4)":     ["8.8.8.8", "8.8.4.4"],
@@ -176,7 +176,6 @@ div.stButton > button { background: #0B58C6 !important; color: #ffffff !importan
 .rtbl th { color: #6b7280; padding: 0.5rem 0.8rem; }
 .rtbl td { padding: 0.6rem 0.8rem; background: var(--secondary-background-color); border-top: 1px solid rgba(0,0,0,0.05); border-bottom: 1px solid rgba(0,0,0,0.05); }
 .rtbl tr.sel td { background: rgba(11, 88, 198, 0.05); border-color: #0B58C6; }
-.ip-count-chip { background: rgba(11, 88, 198, 0.1); color: #0B58C6; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.75rem; font-weight: 800; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -188,6 +187,7 @@ class IPAnalysis:
     ip: str
     ip_version: int = 4
     is_synthetic_v6: bool = False
+    health: str = "healthy"
 
 @dataclass
 class SiteReport:
@@ -211,7 +211,7 @@ class SiteReport:
     dns_profile: str = "Google DNS (IPv4)"
     invalid_reason: str = ""
 
-def _build_resolver(server: str, timeout: float = 1.0) -> "dns.resolver.Resolver":
+def _build_resolver(server: str, timeout: float = 3.0) -> "dns.resolver.Resolver":
     r = dns.resolver.Resolver(configure=False)
     r.nameservers = [server]
     r.timeout  = timeout
@@ -240,7 +240,7 @@ def step_dns(domain: str, dns_profile: str = "Google DNS (IPv4)", req_proto: str
         return [], "\n".join(lines), "err", [], [], []
 
     for server in servers:
-        resolver = _build_resolver(server, timeout=1.0)
+        resolver = _build_resolver(server, timeout=3.0)
         lines.append(f"$ nslookup {domain} {server}")
         server_ipv4, server_ipv6 = [], []
         try:
@@ -292,7 +292,6 @@ def step_dns(domain: str, dns_profile: str = "Google DNS (IPv4)", req_proto: str
     return all_ips, "\n".join(lines), "ok", ipv4_list, ipv6_list, synth_v6
 
 def analyse_ip(ip: str) -> IPAnalysis:
-    # MODIFIED: Removed Ping, Traceroute, ASN, and BGP logic
     is_v6  = ":" in ip
     is_nat64 = ip.startswith("64:ff9b:") or ip.startswith("64:ff9b::")
     return IPAnalysis(ip=ip, ip_version=6 if is_v6 else 4, is_synthetic_v6=is_nat64)
@@ -314,18 +313,34 @@ def analyse_domain(r: SiteReport, dns_profile: str = "Google DNS (IPv4)") -> Sit
     r.resolved_ips, r.resolved_ipv4, r.resolved_ipv6, r.synthetic_ipv6 = all_ips, ipv4_list, ipv6_list, synth_v6
     r.primary_ip = all_ips[0] if all_ips else "0.0.0.0"
 
-    # MODIFIED: Threadpool for heavy calls removed. Just populating IP objects locally.
     ips_to_analyse = list(dict.fromkeys(ipv4_list + ipv6_list + synth_v6))
     for ip in ips_to_analyse:
         r.ip_analyses.append(analyse_ip(ip))
 
-    r.health = "healthy"
+    if "49.44.79.236" in r.resolved_ipv4 and "2405:200:1607:2820:41::36" in r.resolved_ipv6:
+        r.health = "BLOCKED"
+        r.invalid_reason = "Hardcoded Block Rule matched"
+    else:
+        errs  = sum(1 for v in r.steps_status.values() if v == "err" or v == "warn")
+        any_degraded = any(ia.health == "degraded" for ia in r.ip_analyses)
+        if errs: r.health = "critical"
+        elif any_degraded: r.health = "degraded"
+        else: r.health = "healthy"
+
     r.fetch_time = time.perf_counter() - t_start
     return r
 
-def get_health_badge(health, valid=True):
-    if not valid: return f'<span class="badge b-err" style="display:block;width:100%;text-align:center;">Unsuccessful</span>'
-    return '<span class="badge b-ok" style="display:block;width:100%;text-align:center;">Successful</span>'
+def get_health_badge(health, reason="", valid=True):
+    # MODIFIED: Standardized base style for perfect pixel height alignment & updated Rosy Pink color
+    base_style = "display: block; width: 100%; text-align: center; box-sizing: border-box; height: 32px; line-height: 20px; border-radius: 6px; font-weight: 700;"
+    
+    if health == "BLOCKED":
+        return f'<span class="badge" style="{base_style} background: #ffe4e6; color: #e11d48; border: 1px solid #fda4af;">BLOCKED</span>'
+    elif not valid:
+        err_msg = reason if reason else "Connectivity Error"
+        return f'<select class="badge" style="outline:none; cursor:pointer; {base_style} background: rgba(220, 53, 69, 0.15); color: #c82333; border: 1px solid rgba(220, 53, 69, 0.3); padding: 0px 0.4rem; height: 32px; line-height: 30px; font-size:0.8rem;"><option>Unsuccessful</option><option disabled>↳ {err_msg}</option></select>'
+    else:
+        return f'<span class="badge" style="{base_style} background: #dcfce7; color: #16a34a; border: 1px solid #86efac;">Successful</span>'
 
 def _pip(icon, label, sub, status):
     css  = "done" if status == "ok" else "skip"
@@ -336,7 +351,6 @@ def _pip(icon, label, sub, status):
             f'<div class="pip-sub" style="{text_style}">{sub}</div></span><span class="pip-badge {bc}">{bt}</span></div>')
 
 def get_pipeline_html(r: SiteReport) -> str:
-    # MODIFIED: Ping/Traceroute/BGP forced to "skip" visually
     html = '<div class="pipeline">'
     html += _pip("🔍", "DNS Resolution", f"dnspython → {r.dns_profile}", r.steps_status.get("dns","pending"))
     html += _pip("📡", "ICMP/TCP Ping", "Disabled", "skip")
@@ -362,7 +376,6 @@ def render_ip_drilldown(r: SiteReport):
         for ia in ia_list:
             syn_tag = "NAT64 SYNTHETIC" if ia.is_synthetic_v6 else ("NATIVE IPv6" if ia.ip_version==6 else "IPv4")
             st.markdown(f"**{ia.ip}** &nbsp; — &nbsp; `{syn_tag}`")
-            # MODIFIED: Removed Routing Tables and Hop rendering from UI
 
     with tabs[0]: render_ia_list(v4_ips)
     if v6_ips:
@@ -389,7 +402,10 @@ def main():
     st.markdown('<div class="hdr"><div class="hdr-logo"><div class="hdr-jio">JIO</div><div><div class="hdr-title">ISOC Dashboard — DNS EDITION</div></div></div></div>', unsafe_allow_html=True)
 
     c_area, c_opts = st.columns([3, 1], gap="large")
-    with c_area: raw = st.text_area("urls", label_visibility="collapsed", height=150, placeholder="Enter domains here...")
+    
+    with c_area: 
+        raw = st.text_area("urls", label_visibility="collapsed", height=150, placeholder="Enter domains here...")
+        uploaded_file = st.file_uploader("📂 Or bulk upload domains (CSV / JSON)", type=["csv", "json"])
     
     with c_opts:
         dns_sel = st.selectbox("◈ Select DNS", DNS_LABELS, index=DNS_LABELS.index(st.session_state.dns_profile))
@@ -397,17 +413,37 @@ def main():
         st.markdown(f"`{' | '.join(DNS_OPTIONS[dns_sel])}`")
         run_manual = st.button("▶▶ RUN DNS LOOKUP", use_container_width=True)
 
-    if run_manual and raw.strip():
+    if run_manual:
         domains_from_input = [d.strip() for d in raw.strip().splitlines() if d.strip()]
-        st.session_state.reports = [SiteReport(domain=d, dns_profile=dns_sel) for d in domains_from_input[:100]]
-        st.session_state.selected = None
         
-        with st.spinner("Resolving DNS..."):
-            for r in st.session_state.reports:
-                analyse_domain(r, dns_sel)
-        
-        st.session_state.selected = st.session_state.reports[0].domain if st.session_state.reports else None
-        st.rerun()
+        if uploaded_file is not None:
+            try:
+                if uploaded_file.name.endswith('.json'):
+                    file_data = json.load(uploaded_file)
+                    if isinstance(file_data, list):
+                        domains_from_input.extend([str(d).strip() for d in file_data])
+                elif uploaded_file.name.endswith('.csv'):
+                    content = uploaded_file.read().decode('utf-8')
+                    reader = csv.reader(io.StringIO(content))
+                    for row in reader:
+                        if row and row[0].strip():
+                            domains_from_input.append(row[0].strip())
+            except Exception as e:
+                st.error(f"Failed to parse uploaded file: {e}")
+
+        domains_from_input = list(dict.fromkeys(filter(None, domains_from_input)))
+
+        if domains_from_input:
+            # MODIFIED: Input limit increased from 100 to 150
+            st.session_state.reports = [SiteReport(domain=d, dns_profile=dns_sel) for d in domains_from_input[:150]]
+            st.session_state.selected = None
+            
+            with st.spinner("Resolving DNS..."):
+                for r in st.session_state.reports:
+                    analyse_domain(r, dns_sel)
+            
+            st.session_state.selected = st.session_state.reports[0].domain if st.session_state.reports else None
+            st.rerun()
 
     reports = st.session_state.reports
     if not reports: return
@@ -418,17 +454,59 @@ def main():
     st.markdown(f"""
     <div class="mini-stats">
       <div class="mini-stat"><div class="ms-lbl">DOMAINS</div><div class="ms-num">{len(reports)}</div></div>
-      <div class="mini-stat"><div class="ms-lbl">IPs Fetched</div><div class="ms-num">{total_ips}</div></div>
+      <div class="mini-stat"><div class="ms-lbl">TOTAL IPs FETCHED</div><div class="ms-num">{total_ips}</div></div>
       <div class="mini-stat"><div class="ms-lbl">DNS USED</div><div class="ms-num" style="font-size:1rem;">{reports[0].dns_profile}</div></div>
     </div>""", unsafe_allow_html=True)
 
-    st.markdown('<table class="rtbl"><tr><th>DOMAIN</th><th>PRIMARY IP</th><th>DNS</th><th>STATUS</th><th>VIEW</th></tr>', unsafe_allow_html=True)
+    dl_col1, dl_col2, _ = st.columns([1.5, 1.5, 4])
+    report_dicts = [{"Domain": r.domain, "Primary IP": r.primary_ip, "Total IPs": len(r.resolved_ips), "Health": r.health, "DNS Profile": r.dns_profile, "IPv4": ", ".join(r.resolved_ipv4), "IPv6": ", ".join(r.resolved_ipv6)} for r in reports]
+    
+    with dl_col1:
+        csv_buffer = io.StringIO()
+        writer = csv.DictWriter(csv_buffer, fieldnames=report_dicts[0].keys())
+        writer.writeheader()
+        writer.writerows(report_dicts)
+        st.download_button("⬇ Download as CSV", data=csv_buffer.getvalue(), file_name=f"dns_report_{int(time.time())}.csv", mime="text/csv", use_container_width=True)
+        
+    with dl_col2:
+        json_data = json.dumps(report_dicts, indent=2)
+        st.download_button("⬇ Download as JSON", data=json_data, file_name=f"dns_report_{int(time.time())}.json", mime="application/json", use_container_width=True)
+
+    # MODIFIED: Perfectly aligned Custom Header mapping the exact table widths used below
+    col_h1, col_h2 = st.columns([12, 1])
+    with col_h1:
+        st.markdown('''
+        <table class="rtbl" style="margin-bottom: -10px;">
+            <tr>
+                <th style="width:24%">DOMAIN</th>
+                <th style="width:24%">PRIMARY IP</th>
+                <th style="width:12%; text-align:center;">TOTAL IPs</th>
+                <th style="width:20%">DNS</th>
+                <th style="width:20%; text-align:center;">STATUS</th>
+            </tr>
+        </table>
+        ''', unsafe_allow_html=True)
+    with col_h2:
+        st.markdown('<div style="color:#6b7280; font-size:0.85rem; font-weight:bold; text-align:center; padding-top:0.5rem;">VIEW</div>', unsafe_allow_html=True)
     
     for i, r in enumerate(reports):
         is_sel = st.session_state.selected == r.domain
         col1, col2 = st.columns([12, 1])
+        
+        # MODIFIED: Extracted Total IPs into its own distinct aligned column 
         with col1:
-            st.markdown(f'<table class="rtbl"><tr><td style="width:25%"><b>{r.domain}</b></td><td style="width:25%">{r.primary_ip or "—"}</td><td style="width:25%;color:#0B58C6;">{r.dns_profile}</td><td style="width:25%">{get_health_badge(r.health, r.valid)}</td></tr></table>', unsafe_allow_html=True)
+            st.markdown(f'''
+            <table class="rtbl">
+                <tr>
+                    <td style="width:24%"><b>{r.domain}</b></td>
+                    <td style="width:24%">{r.primary_ip or "—"}</td>
+                    <td style="width:12%; text-align:center; font-weight:bold; color:#475569;">{len(r.resolved_ips)}</td>
+                    <td style="width:20%; color:#0B58C6;">{r.dns_profile}</td>
+                    <td style="width:20%">{get_health_badge(r.health, r.invalid_reason, r.valid)}</td>
+                </tr>
+            </table>
+            ''', unsafe_allow_html=True)
+        
         with col2:
             if st.button("▼" if is_sel else "▶", key=f"btn_{i}", use_container_width=True):
                 st.session_state.selected = None if is_sel else r.domain
